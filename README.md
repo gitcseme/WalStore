@@ -1,159 +1,68 @@
 # Write-Ahead Log (WAL) in C#
 
-A .NET 10 command-line utility implementing a Write-Ahead Log with segmentation, protobuf serialization, and periodic sync.
+.NET 10 CLI utility implementing a WAL with segmentation, protobuf serialization, CRC32 checksums, periodic background sync, and async concurrency.
+
+## WAL
+
+A Write-Ahead Log (WAL) ensures durability by recording every write operation to an append-only log on stable storage **before** applying it to the main data structures. On a crash, the database replays the log to restore a consistent state. This also enables point-in-time recovery, replication, and atomicity — all without random I/O to the primary store on every write.
 
 ## Features
 
-- **Store log**: Write records in binary format using Google's Protocol Buffers (protobuf)
-- **Segmentation**: Log files are segmented based on a fixed size threshold; oldest segments are pruned when the max count is exceeded
-- **CRC32 checksums**: Each record includes a CRC32 checksum for data integrity (computed over data + LSN)
-- **Periodic background sync**: A background task flushes buffered data to disk at a configurable interval
-- **Force sync**: Optional OS-level `FlushFileBuffers` after every flush for crash safety
-- **Async concurrency**: Thread-safe writes via `SemaphoreSlim`
-- **Crash recovery**: On restart, WAL resumes from the last segment and continues LSN numbering
-- **Config persistence**: WAL settings can be saved/loaded from a JSON config file
+1. **Segmentation** — fixed-size segment files with oldest pruning
+2. **CRC32 checksums** — integrity verified on every record
+3. **Periodic background sync** — configurable flush interval via `PeriodicTimer`
+4. **Force sync** — optional OS-level flush for crash safety
+5. **Async concurrency** — thread-safe via `SemaphoreSlim`
+6. **LSN persistence** — numbering survives close/reopen
+7. **Config persistence** — JSON config file per WAL directory
 
 ## Architecture
 
-The library follows an object-oriented design with 5 core interfaces and concrete implementations separated by concern:
-
 ```
 src/WalStore.Wal/
-├── Protos/wal_record.proto               # Protobuf record schema
-├── Contracts/
-│   ├── IWalLogger.cs                     # Public WAL API
-│   ├── IWalSegment.cs                    # Single segment file abstraction
-│   ├── IWalSegmentManager.cs             # Segment lifecycle
-│   ├── IWalRecordSerializer.cs           # Record binary format
-│   └── IChecksumProvider.cs              # CRC32 computation
-├── Config/WalConfig.cs                   # WAL settings + JSON persistence
-├── Segments/
-│   ├── WalSegment.cs                     # FileStream wrapper → IWalSegment
-│   └── WalSegmentManager.cs             # Discovery, rotation, cleanup → IWalSegmentManager
-├── Serialization/WalRecordSerializer.cs  # [int32 size][protobuf] → IWalRecordSerializer
-├── Checksum/Crc32ChecksumProvider.cs     # System.IO.Hashing → IChecksumProvider
-├── Sync/SyncScheduler.cs                 # PeriodicTimer loop (extracted concern)
-└── WriteAheadLog.cs                      # Thin orchestrator wiring the components
+├── Protos/wal_record.proto               # protobuf schema
+├── Contracts/                            # 5 interfaces: IWalLogger, IWalSegment,
+│                                         #   IWalSegmentManager, IWalRecordSerializer,
+│                                         #   IChecksumProvider
+├── Segments/WalSegment.cs                # FileStream wrapper
+├── Segments/WalSegmentManager.cs         # Discovery, rotation, cleanup
+├── Serialization/WalRecordSerializer.cs  # [int32 size][protobuf] format
+├── Checksum/Crc32ChecksumProvider.cs     # System.IO.Hashing.Crc32
+├── Sync/SyncScheduler.cs                 # PeriodicTimer background sync
+└── WriteAheadLog.cs                      # Thin orchestrator
+src/WalStore.Cli/                         # System.CommandLine entry point
+tests/WalStore.Wal.Tests/                 # xUnit tests
 ```
 
-`WriteAheadLog` is the thin orchestrator — it delegates to `IWalSegmentManager` for file I/O,
-`IWalRecordSerializer` for record format, `IChecksumProvider` for integrity, and
-`SyncScheduler` for periodic flushing. Each component can be mocked and tested in isolation.
+## CLI
 
 ```
-src/WalStore.Cli/         # CLI entry point
-tests/WalStore.Wal.Tests/ # xUnit tests
+WalStore.Cli write <data> [-d <dir>] [--file-size <bytes>] [--max-segments <n>] [--no-sync] [--sync-interval <ms>]
+WalStore.Cli read [-d <dir>]
+WalStore.Cli replay [-d <dir>] [-f json|raw]
+WalStore.Cli config show [-d <dir>]
+WalStore.Cli config set <key> <value> [-d <dir>]
 ```
-
-## CLI Usage
-
-```
-WalStore.Cli [command] [options]
-```
-
-### Commands
 
 | Command | Description |
 |---|---|
-| `write <data>` | Write a record to the WAL |
-| `read` | Read all records from the WAL |
-| `replay` | Replay records (outputs the data field) |
-| `config` | View or modify WAL configuration |
+| `write` | Write a record with optional segment/sync config |
+| `read` | Print all records with LSN, timestamp, checksum, data |
+| `replay` | Output data field (json as UTF-8, raw as base64) |
+| `config show/set` | View/update `wal.config.json` (keys: max-file-size, max-segments, sync-interval-ms, enable-force-sync) |
 
-### write
-
-```
-WalStore.Cli write <data> [options]
-```
-
-Arguments:
-- `data` — Raw data string to write as a record
-
-Options:
-- `-d, --dir <dir>` — WAL directory path (default: `./walogs`)
-- `--file-size <bytes>` — Max segment file size (default: 16777216 / 16 MB)
-- `--max-segments <n>` — Max number of segment files to retain (default: 100)
-- `--no-sync` — Disable force sync to disk
-- `--sync-interval <ms>` — Sync interval in milliseconds (default: 200)
-
-Example:
-```
-WalStore.Cli write "hello world" -d /tmp/walogs
-```
-
-### read
-
-```
-WalStore.Cli read [options]
-```
-
-Options:
-- `-d, --dir <dir>` — WAL directory path (default: `./walogs`)
-
-Example:
-```
-WalStore.Cli read -d /tmp/walogs
-```
-
-Output:
-```
-LSN=1 Timestamp=8579145384376141252 Checksum=631844488 Data=hello world
---- Total records: 1 ---
-```
-
-### replay
-
-```
-WalStore.Cli replay [options]
-```
-
-Options:
-- `-d, --dir <dir>` — WAL directory path (default: `./walogs`)
-- `-f, --format <format>` — Output format: `json` (default) or `raw` (base64)
-
-Example:
-```
-WalStore.Cli replay -d /tmp/walogs --format json
-```
-
-### config
-
-```
-WalStore.Cli config [command] [options]
-```
-
-Subcommands:
-- `show` — Display current configuration
-- `set <key> <value>` — Update a configuration value
-
-Valid config keys: `max-file-size`, `max-segments`, `sync-interval-ms`, `enable-force-sync`
-
-Example:
-```
-WalStore.Cli config show -d /tmp/walogs
-WalStore.Cli config set max-file-size 8388608 -d /tmp/walogs
-```
-
-## Record Format (protobuf)
+## Record Format
 
 ```protobuf
 message WalRecord {
     bytes  data                = 3;
     uint64 log_sequence_number = 1;
-    int64  timestamp           = 2;  // milliseconds since Unix epoch
-    uint32 checksum            = 4;  // CRC32 of data + LSN
+    int64  timestamp           = 2;  // ms since Unix epoch
+    uint32 checksum            = 4;  // CRC32(data + LSN)
 }
 ```
 
-Each record is stored on disk as `[int32 little-endian size][protobuf bytes]`.
-
-## Segment File Naming
-
-```
-wal-segment-{N}.log
-```
-
-Segments are numbered sequentially starting from 1. When the current segment exceeds `max-file-size`, a new segment is created. If the segment count exceeds `max-segments`, the oldest segment is deleted.
+On disk: `[int32 LE size][protobuf bytes]`. Segments: `wal-segment-{N}.log`.
 
 ## Tests
 
@@ -163,9 +72,11 @@ dotnet test
 
 | Test | What it verifies |
 |---|---|
-| `WriteAndReadRecords` | Write N records, close, reopen, read back — data matches |
-| `LogSequenceNumberIncrements` | LSN starts at 0, increments by 1 per write |
-| `ChecksumIsPresentOnRecords` | Each record has a non-zero CRC32 checksum |
-| `SegmentRotation` | Small max size forces rotation; old segments pruned at max count |
-| `ReadFromEmptyWalReturnsEmptyList` | Fresh WAL returns empty list on read |
-| `LsnSurvivesRestart` | LSN counter persists across WAL close/reopen cycles |
+| `WriteAndReadRecords` | Data survives close/reopen cycle |
+| `LogSequenceNumberIncrements` | LSN starts at 1, increments by 1 per write |
+| `ChecksumIsPresentOnRecords` | Each record has non-zero CRC32 |
+| `SegmentRotation` | Max file size triggers rotation; old segments pruned |
+| `ReadFromEmptyWalReturnsEmptyList` | Fresh WAL read returns empty |
+| `LsnSurvivesRestart` | LSN counter persists across close/reopen |
+
+Ported from [Go wal-store](https://github.com/anomalyco/wal-store).
