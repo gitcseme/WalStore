@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WalStore.Cli/WalStore.Cli.csproj" />
+    <Project Path="src/WalStore.Wal/WalStore.Wal.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WalStore.Wal.Tests/WalStore.Wal.Tests.csproj" />
+  </Folder>
+</Solution>
