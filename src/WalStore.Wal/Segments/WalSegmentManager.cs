@@ -1,22 +1,35 @@
+using WalStore.Wal.Checksum;
 using WalStore.Wal.Contracts;
+using WalStore.Wal.Recovery;
+using WalStore.Wal.Serialization;
 
 namespace WalStore.Wal.Segments;
 
 public sealed class WalSegmentManager : IWalSegmentManager
 {
-    private const string SegmentPrefix = "wal-segment-";
-    private const string SegmentExtension = ".log";
+    private readonly IWalRecovery _recovery;
 
     private string _directory = string.Empty;
     private IWalSegment? _currentSegment;
 
+    public WalSegmentManager()
+        : this(new WalRecovery(new WalRecordSerializer(), new Crc32ChecksumProvider()))
+    {
+    }
+
+    public WalSegmentManager(IWalRecovery recovery) => _recovery = recovery;
+
     public IWalSegment CurrentSegment =>
         _currentSegment ?? throw new InvalidOperationException("Segment manager not initialized");
 
-    public async Task InitializeAsync(string directory)
+    public async Task InitializeAsync(string directory, CancellationToken ct = default)
     {
         _directory = directory;
         Directory.CreateDirectory(directory);
+
+        // Repair before opening anything: recovery rewrites segment files, and segments are
+        // opened without FileShare.Delete, appending, with their length cached at open.
+        await _recovery.RecoverDirectoryAsync(directory, ct);
 
         var files = GetSegmentFiles();
 
@@ -54,22 +67,18 @@ public sealed class WalSegmentManager : IWalSegmentManager
     public async ValueTask DisposeAsync()
     {
         if (_currentSegment is not null)
+        {
             await _currentSegment.DisposeAsync();
+            _currentSegment = null;
+        }
     }
 
     private string[] GetSegmentFiles() =>
-        Directory.GetFiles(_directory, $"{SegmentPrefix}*{SegmentExtension}");
+        Directory.GetFiles(_directory, WalSegmentNaming.SearchPattern);
 
     private static int GetLastSegmentFileNumber(string[] files) =>
-        files.Max(ParseSegmentNumber);
+        files.Max(WalSegmentNaming.ParseNumber);
 
     private static string GetOldestSegmentFile(string[] files) =>
-        files.MinBy(ParseSegmentNumber)!;
-
-    private static int ParseSegmentNumber(string filePath)
-    {
-        var fileName = Path.GetFileName(filePath);
-        var numberPart = fileName[SegmentPrefix.Length..^SegmentExtension.Length];
-        return int.Parse(numberPart);
-    }
+        files.MinBy(WalSegmentNaming.ParseNumber)!;
 }

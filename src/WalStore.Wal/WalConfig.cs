@@ -5,9 +5,9 @@ namespace WalStore.Wal;
 
 public class WalConfig
 {
-    public long MaxFileSize { get; set; } = 16 * 1024 * 1024;
+    public long MaxFileSize { get; set; } = 16 * 1024 * 1024; // 16 MB
     public int MaxSegments { get; set; } = 100;
-    public bool EnableForceSync { get; set; } = true;
+    public bool ForceSyncEnabled { get; set; } = true;
     public uint SyncIntervalMs { get; set; } = 200;
 
     [JsonIgnore]

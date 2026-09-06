@@ -12,7 +12,7 @@ public sealed class WalSegment : IWalSegment
     public WalSegment(string directory, int number, FileMode mode)
     {
         _number = number;
-        _filePath = Path.Combine(directory, $"wal-segment-{number}.log");
+        _filePath = WalSegmentNaming.FilePath(directory, number);
         _stream = new FileStream(_filePath, mode, FileAccess.Write,
             FileShare.ReadWrite, 4096, FileOptions.Asynchronous);
 

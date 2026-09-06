@@ -173,8 +173,6 @@ public class WriteAheadLogTests
                 append.WriteByte(0xFF);
             }
 
-            RecoverFileDirect(segmentFile);
-
             await using (var wal = await WriteAheadLog.StartAsync(config))
             {
                 var records = await wal.ReadAllRecordsAsync();
@@ -214,9 +212,6 @@ public class WriteAheadLogTests
             rng.NextBytes(bytes.AsSpan(offset + 4, size2));
             await File.WriteAllBytesAsync(segmentFile, bytes);
 
-            // File-level recovery without WAL (avoids scheduler deadlock during close)
-            RecoverFileDirect(segmentFile);
-
             await using (var wal = await WriteAheadLog.StartAsync(config))
             {
                 var records = await wal.ReadAllRecordsAsync();
@@ -230,43 +225,6 @@ public class WriteAheadLogTests
         }
     }
 
-    private static void RecoverFileDirect(string filePath)
-    {
-        var fileBytes = File.ReadAllBytes(filePath);
-        if (fileBytes.Length == 0) return;
-
-        var serializer = new WalRecordSerializer();
-        var checksumProvider = new Crc32ChecksumProvider();
-        var position = 0;
-        var endOfLastValid = 0L;
-
-        while (position + sizeof(int) <= fileBytes.Length)
-        {
-            var size = BitConverter.ToInt32(fileBytes, position);
-            position += sizeof(int);
-
-            if (size <= 0 || (long)position + size > fileBytes.Length)
-                break;
-
-            try
-            {
-                var record = serializer.Deserialize(fileBytes.AsMemory(position, size));
-                var expected = checksumProvider.Compute(record.Data.ToByteArray(), record.LogSequenceNumber);
-                if (record.Checksum != expected)
-                    break;
-                position += size;
-                endOfLastValid = position;
-            }
-            catch
-            {
-                break;
-            }
-        }
-
-        if (endOfLastValid == fileBytes.Length) return;
-        if (endOfLastValid == 0) { File.Delete(filePath); return; }
-        File.WriteAllBytes(filePath, fileBytes[..(int)endOfLastValid]);
-    }
     [Fact]
     public async Task RecoverOnHealthyWalIsNoOp()
     {
@@ -281,7 +239,6 @@ public class WriteAheadLogTests
             }
 
             var segmentFile = Directory.GetFiles(dir, "wal-segment-*.log")[0];
-            RecoverFileDirect(segmentFile);
 
             await using (var wal = await WriteAheadLog.StartAsync(config))
             {
