@@ -15,6 +15,11 @@ public sealed class SyncScheduler : IAsyncDisposable
 
     public void Start()
     {
+        // Overwriting a running loop would orphan it: its CTS becomes unreachable, so it
+        // can never be cancelled and keeps flushing a WAL that may already be disposed.
+        if (_task is not null)
+            throw new InvalidOperationException("Scheduler already started");
+
         _cts = new CancellationTokenSource();
         _task = RunAsync(_cts.Token);
     }
