@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Google.Protobuf;
 using WalStore.Wal.Checksum;
 using WalStore.Wal.Contracts;
@@ -18,7 +19,7 @@ public sealed class WriteAheadLog : IWalLogger
     private ulong _lastLsn;
     private bool _disposed;
 
-    private WriteAheadLog(WalConfig config, IWalSegmentManager segmentManager,
+    internal WriteAheadLog(WalConfig config, IWalSegmentManager segmentManager,
         IWalRecordSerializer serializer, IChecksumProvider checksumProvider)
     {
         _config = config;
@@ -159,6 +160,89 @@ public sealed class WriteAheadLog : IWalLogger
     }
 
     public async ValueTask DisposeAsync() => await CloseAsync();
+
+    public async Task RecoverAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            await _scheduler.StopAsync();
+            await _segmentManager.DisposeAsync();
+
+            var dir = _config.Directory;
+            if (!Directory.Exists(dir))
+                return;
+
+            var segmentFiles = Directory.GetFiles(dir, "wal-segment-*.log")
+                .OrderBy(f =>
+                {
+                    var name = Path.GetFileName(f);
+                    var num = name["wal-segment-".Length..^".log".Length];
+                    return int.Parse(num);
+                })
+                .ToArray();
+
+            foreach (var file in segmentFiles)
+                await RecoverSegmentFileAsync(file, ct);
+
+            await _segmentManager.InitializeAsync(dir);
+            _lastLsn = await DiscoverLastLsnAsync();
+            _scheduler.Start();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private async Task RecoverSegmentFileAsync(string filePath, CancellationToken ct)
+    {
+        var fileBytes = await File.ReadAllBytesAsync(filePath, ct);
+        if (fileBytes.Length == 0)
+            return;
+
+        var position = 0;
+        var endOfLastValid = 0L;
+
+        while (position + sizeof(int) <= fileBytes.Length)
+        {
+            var size = BinaryPrimitives.ReadInt32LittleEndian(fileBytes.AsSpan(position));
+            position += sizeof(int);
+
+            if (size <= 0 || (long)position + size > fileBytes.Length)
+                break;
+
+            var recordBytes = fileBytes.AsMemory(position, size);
+            position += size;
+
+            try
+            {
+                var record = _serializer.Deserialize(recordBytes);
+                var expected = _checksumProvider.Compute(record.Data.ToByteArray(), record.LogSequenceNumber);
+                if (record.Checksum != expected)
+                    break;
+
+                endOfLastValid = position;
+            }
+            catch
+            {
+                break;
+            }
+        }
+
+        if (endOfLastValid == fileBytes.Length)
+            return;
+
+        if (endOfLastValid == 0)
+        {
+            File.Delete(filePath);
+            return;
+        }
+
+        File.WriteAllBytes(filePath, fileBytes[..(int)endOfLastValid]);
+    }
 
     private async Task FlushAsync()
     {

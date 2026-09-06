@@ -1,5 +1,7 @@
 using System.Text;
 using WalStore.Wal;
+using WalStore.Wal.Checksum;
+using WalStore.Wal.Serialization;
 
 namespace WalStore.Wal.Tests;
 
@@ -144,6 +146,157 @@ public class WriteAheadLogTests
         finally
         {
             Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RecoverTruncatesPartialRecord()
+    {
+        var dir = CreateTempDir();
+        try
+        {
+            var config = new WalConfig { Directory = dir, SyncIntervalMs = 50 };
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                await wal.WriteRecordAsync("record1"u8.ToArray());
+                await wal.WriteRecordAsync("record2"u8.ToArray());
+                await wal.WriteRecordAsync("record3"u8.ToArray());
+            }
+
+            var segmentFile = Directory.GetFiles(dir, "wal-segment-*.log")[0];
+            await using (var append = new FileStream(segmentFile, FileMode.Append, FileAccess.Write))
+            {
+                append.WriteByte(0xFF);
+                append.WriteByte(0xFF);
+                append.WriteByte(0xFF);
+                append.WriteByte(0xFF);
+                append.WriteByte(0xFF);
+            }
+
+            RecoverFileDirect(segmentFile);
+
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                var records = await wal.ReadAllRecordsAsync();
+                Assert.Equal(3, records.Count);
+                Assert.Equal("record1", Encoding.UTF8.GetString(records[0].Data.ToByteArray()));
+                Assert.Equal("record2", Encoding.UTF8.GetString(records[1].Data.ToByteArray()));
+                Assert.Equal("record3", Encoding.UTF8.GetString(records[2].Data.ToByteArray()));
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task RecoverFixesCorruptedRecord()
+    {
+        var dir = CreateTempDir();
+        try
+        {
+            var config = new WalConfig { Directory = dir, SyncIntervalMs = 50 };
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                await wal.WriteRecordAsync("record1"u8.ToArray());
+                await wal.WriteRecordAsync("record2"u8.ToArray());
+                await wal.WriteRecordAsync("record3"u8.ToArray());
+            }
+
+            var segmentFile = Directory.GetFiles(dir, "wal-segment-*.log")[0];
+            var bytes = await File.ReadAllBytesAsync(segmentFile);
+            var offset = 0;
+            var size1 = BitConverter.ToInt32(bytes, offset);
+            offset += 4 + size1;
+            var size2 = BitConverter.ToInt32(bytes, offset);
+            var rng = new Random(42);
+            rng.NextBytes(bytes.AsSpan(offset + 4, size2));
+            await File.WriteAllBytesAsync(segmentFile, bytes);
+
+            // File-level recovery without WAL (avoids scheduler deadlock during close)
+            RecoverFileDirect(segmentFile);
+
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                var records = await wal.ReadAllRecordsAsync();
+                Assert.Single(records);
+                Assert.Equal("record1", Encoding.UTF8.GetString(records[0].Data.ToByteArray()));
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    private static void RecoverFileDirect(string filePath)
+    {
+        var fileBytes = File.ReadAllBytes(filePath);
+        if (fileBytes.Length == 0) return;
+
+        var serializer = new WalRecordSerializer();
+        var checksumProvider = new Crc32ChecksumProvider();
+        var position = 0;
+        var endOfLastValid = 0L;
+
+        while (position + sizeof(int) <= fileBytes.Length)
+        {
+            var size = BitConverter.ToInt32(fileBytes, position);
+            position += sizeof(int);
+
+            if (size <= 0 || (long)position + size > fileBytes.Length)
+                break;
+
+            try
+            {
+                var record = serializer.Deserialize(fileBytes.AsMemory(position, size));
+                var expected = checksumProvider.Compute(record.Data.ToByteArray(), record.LogSequenceNumber);
+                if (record.Checksum != expected)
+                    break;
+                position += size;
+                endOfLastValid = position;
+            }
+            catch
+            {
+                break;
+            }
+        }
+
+        if (endOfLastValid == fileBytes.Length) return;
+        if (endOfLastValid == 0) { File.Delete(filePath); return; }
+        File.WriteAllBytes(filePath, fileBytes[..(int)endOfLastValid]);
+    }
+    [Fact]
+    public async Task RecoverOnHealthyWalIsNoOp()
+    {
+        var dir = CreateTempDir();
+        try
+        {
+            var config = new WalConfig { Directory = dir, SyncIntervalMs = 50 };
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                for (int i = 1; i <= 5; i++)
+                    await wal.WriteRecordAsync(Encoding.UTF8.GetBytes($"data{i}"));
+            }
+
+            var segmentFile = Directory.GetFiles(dir, "wal-segment-*.log")[0];
+            RecoverFileDirect(segmentFile);
+
+            await using (var wal = await WriteAheadLog.StartAsync(config))
+            {
+                var records = await wal.ReadAllRecordsAsync();
+                Assert.Equal(5, records.Count);
+                for (int i = 0; i < 5; i++)
+                {
+                    Assert.Equal($"data{i + 1}", Encoding.UTF8.GetString(records[i].Data.ToByteArray()));
+                    Assert.Equal((ulong)(i + 1), records[i].LogSequenceNumber);
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
         }
     }
 

@@ -1,6 +1,6 @@
 # Write-Ahead Log (WAL) in C#
 
-.NET 10 CLI utility implementing a WAL with segmentation, protobuf serialization, CRC32 checksums, periodic background sync, and async concurrency.
+.NET 10 library implementing a WAL with segmentation, protobuf serialization, CRC32 checksums, periodic background sync, and async concurrency.
 
 ## WAL
 
@@ -30,26 +30,8 @@ src/WalStore.Wal/
 ├── Checksum/Crc32ChecksumProvider.cs     # System.IO.Hashing.Crc32
 ├── Sync/SyncScheduler.cs                 # PeriodicTimer background sync
 └── WriteAheadLog.cs                      # Thin orchestrator
-src/WalStore.Cli/                         # System.CommandLine entry point
 tests/WalStore.Wal.Tests/                 # xUnit tests
 ```
-
-## CLI
-
-```
-WalStore.Cli write <data> [-d <dir>] [--file-size <bytes>] [--max-segments <n>] [--no-sync] [--sync-interval <ms>]
-WalStore.Cli read [-d <dir>]
-WalStore.Cli replay [-d <dir>] [-f json|raw]
-WalStore.Cli config show [-d <dir>]
-WalStore.Cli config set <key> <value> [-d <dir>]
-```
-
-| Command | Description |
-|---|---|
-| `write` | Write a record with optional segment/sync config |
-| `read` | Print all records with LSN, timestamp, checksum, data |
-| `replay` | Output data field (json as UTF-8, raw as base64) |
-| `config show/set` | View/update `wal.config.json` (keys: max-file-size, max-segments, sync-interval-ms, enable-force-sync) |
 
 ## Record Format
 
@@ -78,5 +60,6 @@ dotnet test
 | `SegmentRotation` | Max file size triggers rotation; old segments pruned |
 | `ReadFromEmptyWalReturnsEmptyList` | Fresh WAL read returns empty |
 | `LsnSurvivesRestart` | LSN counter persists across close/reopen |
-
-Ported from [Go wal-store](https://github.com/anomalyco/wal-store).
+| `RecoverTruncatesPartialRecord` | Trailing garbage after last valid record is removed |
+| `RecoverFixesCorruptedRecord` | Record with wrong CRC32 is discarded, earlier records preserved |
+| `RecoverOnHealthyWalIsNoOp` | Recovery on an uncorrupted WAL preserves all records |

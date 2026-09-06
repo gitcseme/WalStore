@@ -16,6 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="WalStore.Wal.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Protobuf Include="Protos\*.proto" GrpcServices="None" OutputDir="$(MSBuildProjectDirectory)\Generated" />
   </ItemGroup>
 
